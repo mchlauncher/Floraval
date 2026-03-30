@@ -2866,10 +2866,10 @@ input:checked + .toggleSwitchSlider:before {
 
 /* Logo image. */
 #image_seal {
-    height: 70px;
+    height: 91px;
     width: auto;
     position: relative;
-    border: 2px solid white;
+    border: 2px solid transparent;
     box-sizing: border-box;
     border-radius: 50%;
 }
