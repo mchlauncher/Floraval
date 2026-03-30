@@ -2,6 +2,7 @@
  * Script for landing.ejs
  */
 // Requirements
+const fs                      = require('fs-extra')
 const { URL }                 = require('url')
 const {
     MojangRestAPI,
@@ -97,6 +98,44 @@ function setDownloadPercentage(percent){
 function setLaunchEnabled(val){
     document.getElementById('launch_button').disabled = !val
 }
+
+// 스크린샷 버튼
+document.getElementById('screenshotsMediaButton').onclick = async e => {
+    const screenshotDir = path.join(
+        ConfigManager.getInstanceDirectory(),
+        ConfigManager.getSelectedServer(),
+        'screenshots'
+    );
+    await fs.ensureDir(screenshotDir);
+    shell.openPath(screenshotDir);
+};
+
+// 게임 해상도 변경
+document.addEventListener('DOMContentLoaded', () => {
+    const resolutionDropdown = document.getElementById('resolutionDropdown');
+    const currentResolution = ConfigManager.getGameWidth() + 'x' + ConfigManager.getGameHeight();
+    let optionExists = false;
+    for (let i = 0; i < resolutionDropdown.options.length; i++) {
+        if (resolutionDropdown.options[i].value === currentResolution) {
+            optionExists = true;
+            resolutionDropdown.options[i].selected = true;
+            break;
+        }
+    }
+    if (!optionExists) {
+        const newOption = document.createElement('option');
+        newOption.value = currentResolution;
+        newOption.text = currentResolution;
+        newOption.selected = true;
+        resolutionDropdown.appendChild(newOption);
+    }
+    resolutionDropdown.addEventListener('change', function() {
+        const [width, height] = this.value.split('x');
+        ConfigManager.setGameWidth(width);
+        ConfigManager.setGameHeight(height);
+        ConfigManager.save();
+    });
+});
 
 // Bind launch button
 document.getElementById('launch_button').addEventListener('click', async e => {
@@ -956,71 +995,63 @@ function displayArticle(articleObject, index){
  * Load news information from the RSS feed specified in the
  * distribution index.
  */
-async function loadNews(){
+async function loadNews() {
+    try {
+        const distroData = await DistroAPI.getDistribution()
+        if (!distroData.rawDistribution.rss) {
+            loggerLanding.debug('No Chzzk channel ID provided.')
+            return null
+        }
+        const CHANNEL_ID = distroData.rawDistribution.rss
 
-    const distroData = await DistroAPI.getDistribution()
-    if(!distroData.rawDistribution.rss) {
-        loggerLanding.debug('No RSS feed provided.')
-        return null
-    }
+        const apiUrl = `https://apis.naver.com/nng_main/nng_comment_api/v1/type/CHANNEL_POST/id/${CHANNEL_ID}/comments?limit=10&offset=0&orderType=DESC&pagingType=PAGE`
+        const response = await fetch(apiUrl, { signal: AbortSignal.timeout(5000) })
 
-    const promise = new Promise((resolve, reject) => {
-        
-        const newsFeed = distroData.rawDistribution.rss
-        const newsHost = new URL(newsFeed).origin + '/'
-        $.ajax({
-            url: newsFeed,
-            success: (data) => {
-                const items = $(data).find('item')
-                const articles = []
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`)
+        }
 
-                for(let i=0; i<items.length; i++){
-                // JQuery Element
-                    const el = $(items[i])
+        const data = await response.json()
+        const items = data?.content?.comments?.data || []
 
-                    // Resolve date.
-                    const date = new Date(el.find('pubDate').text()).toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: 'numeric'})
+        const articles = items.map(el => {
+            const { comment, user } = el
 
-                    // Resolve comments.
-                    let comments = el.find('slash\\:comments').text() || '0'
-                    comments = comments + ' Comment' + (comments === '1' ? '' : 's')
+            // createdDate 형식: "20260324215709" (yyyyMMddHHmmss KST)
+            const raw = comment.createdDate
+            const iso = `${raw.slice(0,4)}-${raw.slice(4,6)}-${raw.slice(6,8)}T${raw.slice(8,10)}:${raw.slice(10,12)}:${raw.slice(12,14)}+09:00`
+            const dateObj = new Date(iso)
+            const date = dateObj.toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' })
+            const time = dateObj.toLocaleTimeString('ko-KR', { hour: 'numeric', minute: '2-digit', hour12: true })
 
-                    // Fix relative links in content.
-                    let content = el.find('content\\:encoded').text()
-                    let regex = /src="(?!http:\/\/|https:\/\/)(.+?)"/g
-                    let matches
-                    while((matches = regex.exec(content))){
-                        content = content.replace(`"${matches[1]}"`, `"${newsHost + matches[1]}"`)
-                    }
+            // content 첫 줄이 제목, 나머지가 본문
+            const lines = comment.content.split('\n')
+            const title = lines[0].trim()
+            const body = lines.slice(1).join('\n').trim().replace(/\n/g, '<br>')
 
-                    let link   = el.find('link').text()
-                    let title  = el.find('title').text()
-                    let author = el.find('dc\\:creator').text()
+            // 첨부 이미지가 있으면 본문에 추가
+            const images = (comment.attaches || [])
+                .filter(a => a.attachType === 'PHOTO')
+                .map(a => `<img src="${a.attachValue}" style="max-width:100%">`)
+                .join('')
 
-                    // Generate article.
-                    articles.push(
-                        {
-                            link,
-                            title,
-                            date,
-                            author,
-                            content,
-                            comments,
-                            commentsLink: link + '#comments'
-                        }
-                    )
-                }
-                resolve({
-                    articles
-                })
-            },
-            timeout: 2500
-        }).catch(err => {
-            resolve({
-                articles: null
-            })
+            const articleUrl = `https://chzzk.naver.com/${CHANNEL_ID}/community/detail/${comment.commentId}`
+
+            return {
+                link: articleUrl,
+                title,
+                date: `${date} ${time}`,
+                author: user.userNickname,
+                content: body + images,
+                comments: `댓글 ${comment.childObjectCount}개`,
+                commentsLink: articleUrl
+            }
         })
-    })
 
-    return await promise
+        return { articles }
+
+    } catch (err) {
+        loggerLanding.error('Failed to load news:', err)
+        return { articles: null }
+    }
 }
